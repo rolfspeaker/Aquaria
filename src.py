@@ -25,11 +25,14 @@ import threading
 
 wallpaper = Image.open("Assets/Images/rakai_denisovan.png")
 
+past_label: str | None = None
+
 pages: dict[int, object] = {}
 current_page: int = 1
 
 TEMP_OUTPUT_PATH = r"C:\Users\Gain Eager\Downloads\aquaria_export_silent.mp4"
 OUTPUT_PATH = r"C:\Users\Gain Eager\Downloads\aquaria_export.mp4"
+
 
 program_colors: dict[str, str] = {
     "primary_color" : "#8B5CF6",
@@ -77,8 +80,8 @@ class Aquaria(ctk.CTk):
 
         self.player_events.event_attach(
             vlc.EventType.MediaPlayerEndReached, 
-            self.on_preview_end
-        )
+            self.on_preview_end 
+        ) 
 
         title_label = ctk.CTkLabel(self,
             text="Aquaria - Video Watermarking Tool",
@@ -138,16 +141,39 @@ class Aquaria(ctk.CTk):
         restart_button.pack(pady=10); self.restart_button = restart_button
         pages[4] = restart_button; self.restart_button.pack_forget()  # Hide the restart button initially
 
-    def destroy_export(self):
-        self.video_player.stop()
-        self.video_player.set_media(None)
+        abort_button = ctk.CTkButton(
+            master=self,
+            text="Abort Process",
+            font=("Segoe UI", 12, "bold"),
+            width=90,
+            height=32,
+            fg_color="#FF0000",
+            hover_color="#FF5555",
+            command=self.abort_export_process,
+        )
+        abort_button.pack(pady=10); self.abort_button = abort_button
+        pages[5] = abort_button; self.abort_button.pack_forget()  # Hide the restart button initially
+
+    def abort_export_process(self):
+        print("Aborted")
+        self.exporting = False; self.title_label.configure(text="Export terminated! Select a new watermark image?")
+        self.previous_page()
+        
+    def destroy_export(self, return_to_start: bool = True):
+        if return_to_start:
+            self.video_player.stop()
+            self.video_player.set_media(None)
 
         video_path = Path(OUTPUT_PATH)
 
         if video_path.is_file():
             video_path.unlink()
+        elif Path(TEMP_OUTPUT_PATH):
+            Path(TEMP_OUTPUT_PATH).unlink()
 
-        self.reset_program()
+        if return_to_start == True:
+            self.reset_program()
+        
 
     def on_preview_end(self, event):
         self.after(0, self.loop_preview)
@@ -211,7 +237,7 @@ class Aquaria(ctk.CTk):
             #self.canvas.itemconfig(self.wallpaper_id, image=self.watermark_image_tk)
             
             self.title_label.configure(text=f"Selected Watermark: {os.path.basename(file_path)}")
-
+ 
             self.back_button.pack_forget(); 
             self.finalize_button.pack()  # Show the finalize button
 
@@ -240,7 +266,9 @@ class Aquaria(ctk.CTk):
     def set_text_status(self, text):
         self.after(0, lambda: self.title_label.configure(text=text))
 
-    def edit_video(self, video_path: str, watermark: Image.Image) -> None:     
+    def edit_video(self, video_path: str, watermark: Image.Image) -> None:  
+        self.exporting = True
+
         self.cvideo = VideoCapture(str(self.file_path))
         if not self.cvideo.isOpened():
             self.set_text_status("Could not open the selected video."); return
@@ -259,7 +287,7 @@ class Aquaria(ctk.CTk):
         height = int(self.cvideo.get(opencv.CAP_PROP_FRAME_HEIGHT))
 
         writer = opencv.VideoWriter(
-            r"C:\Users\Gain Eager\Downloads\aquaria_export.mp4",
+            TEMP_OUTPUT_PATH,
             fourcc,
             fps,
             (width, height),
@@ -270,15 +298,20 @@ class Aquaria(ctk.CTk):
             sys.exit()
 
         ended_prematurely: bool = False
+        self.abort_button.pack(pady=10)
 
         while True:
+            if not self.exporting:
+                ended_prematurely = True; self.cvideo.release(); 
+                writer.release(); self.destroy_export(False)
+                break
+
             ret, frame = self.cvideo.read()
             if ret:
                 self.processing_stats["processed_frames"] += 1; self.set_text_status(
                     f"Exporting with watermark... {self.processing_stats['processed_frames']}/{self.processing_stats['total_frames']} frames processed"
                 )
-            else:
-               
+            else:               
                 break    
             
             frame = self.insert_watermark(frame, watermark)
@@ -291,10 +324,44 @@ class Aquaria(ctk.CTk):
         print(self.processing_stats["processed_frames"], self.processing_stats["total_frames"])
 
         if ended_prematurely:
-            print(f"Ended prematurely: {self.processing_stats['processed_frames']}/{self.processing_stats['total_frames']} frames processed"); time.sleep(5) # Pause for 5 seconds to allow the user to read the message
-            self.reset_program(); return
+            #print(f"Ended prematurely: {self.processing_stats['processed_frames']}/{self.processing_stats['total_frames']} frames processed"); time.sleep(5) # Pause for 5 seconds to allow the user to read the message
+            return
         
-        self.set_text_status(f"Watermarking complete! Exported video saved to: C:\\Users\\Gain Eager\\Downloads\\aquaria_export.mp4")
+        self.title_label.configure(text="Adding original audio...")
+
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i", TEMP_OUTPUT_PATH,  # silent watermarked video
+                    "-i", video_path,        # original video with sound
+                    "-map", "0:v:0",
+                    "-map", "1:a?",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-shortest",
+                    OUTPUT_PATH,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        except subprocess.CalledProcessError as error:
+            self.title_label.configure(text="Could not add audio to the export.")
+            return
+
+        except FileNotFoundError:
+            self.title_label.configure(
+                text="FFmpeg was not found. Restart VS Code and try again."
+            )
+            return
+
+        if os.path.exists(TEMP_OUTPUT_PATH):
+            os.remove(TEMP_OUTPUT_PATH)
+            
+        self.set_text_status(f"Watermarking complete! Exported video saved to: {OUTPUT_PATH}")
         self.exported_media = self.vlc_app.media_new_path(OUTPUT_PATH)
 
         # Replace the current video with the new exported video
@@ -359,7 +426,10 @@ class Aquaria(ctk.CTk):
         )
         if file_path:
             self.file_path = file_path
-
+                       
+            global past_label
+            past_label = self.title_label._text
+            
             print(f"Selected file: {file_path}")
             self.video_player.set_media(self.vlc_app.media_new(file_path))
 
